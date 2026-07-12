@@ -121,14 +121,14 @@ pack-%: docker-build-base docker-build-erofs
 		rustup target add $*-unknown-linux-musl && \
 		$(CARGO) build --release --locked --target $*-unknown-linux-musl -p bootstrap && \
 		$(CARGO) build --release --locked --target $*-unknown-linux-musl -p bootstrap --example $(INIT_PAYLOAD)"
-	@mkdir -p build/$*/runtime build/$*/pack
-	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(EROFS_IMAGE) \
+	@mkdir -p build/$*/pack
+	$(DOCKER_RUN) $(DOCKER_SAMEUSER) \
+		-e SOURCE_DATE_EPOCH -e DATA_SIZE_MB -e ROOTFS_UUID -e VERITY_SALT \
+		$(EROFS_IMAGE) \
 		sh tools/mkruntime.sh \
+			--bootstrap "target/$*-unknown-linux-musl/release/bootstrap" \
 			"target/$*-unknown-linux-musl/release/examples/$(INIT_PAYLOAD)" \
-			"build/$*/runtime"
-	@cp "target/$*-unknown-linux-musl/release/bootstrap" "build/$*/pack/stage2"
-	@cat "build/$*/runtime/payload.zip" >> "build/$*/pack/stage2"
-	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(EROFS_IMAGE) sh -c "cd build/$*/pack && zip -q -A stage2"
+			"build/$*/pack/stage2"
 	@echo "packed stage2 ($(INIT_PAYLOAD)): $$(stat -c%s build/$*/pack/stage2) bytes"
 
 clean:

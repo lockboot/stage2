@@ -26,7 +26,17 @@ const ATTEST_DIR: &str = "/newroot/run/lockboot";
 const INIT: &str = "/init";
 const STAGE1_ATTEST: &str = "/tmp/stage1.attest";
 
-fn main() -> Result<()> {
+fn main() {
+    // PID 1 must never exit: a returning init panics the kernel ("Attempted to kill init"), which on
+    // a cloud VM spins a vCPU at 100% forever. Own our failure instead -- log it, then power off.
+    if let Err(e) = run() {
+        fatal_halt(e);
+    }
+}
+
+/// The loader body. Returns only on error; on success `switch_root_exec` execs `/init` and never
+/// returns.
+fn run() -> Result<()> {
     // Our appended payload (rootfs erofs + verity params + ext4 base), read from /proc/self/exe.
     let payload = payload::load_self().context("load appended payload")?;
 
@@ -35,12 +45,12 @@ fn main() -> Result<()> {
     std::io::stdin()
         .read_to_end(&mut cfg)
         .context("read config from stdin")?;
-    tpm_derive::extend_workload_pcr(&tpm_derive::config_digest(&cfg))
+    tpm_derive::extend_config_pcr(&tpm_derive::config_digest(&cfg))
         .context("bind config into PCR15")?;
     // SAFETY: fd 0 is a seekable memfd (stage1's model); rewind it for the downstream /init.
     unsafe { libc::lseek(0, 0, libc::SEEK_SET) };
 
-    // AEAD data key, bound to PCR14 (code+rootfs) + PCR15 (config) + the rest.
+    // XTS data key, bound to PCR14 (code+rootfs) + PCR15 (config) + the rest.
     let key = tpm_derive::derive_data_key().context("derive data key")?;
 
     // Partitions on the boot device.
@@ -95,6 +105,26 @@ fn main() -> Result<()> {
 
     // Pivot onto the overlay and exec /init (fd 0 = rewound config memfd).
     pivot::switch_root_exec(NEWROOT, INIT)
+}
+
+/// Fatal boot error handler for PID 1. Log the error, give a 60 s grace window for console/serial
+/// capture, then issue a clean ACPI power-off so a failed instance *stops* rather than spinning a
+/// vCPU on a kernel panic (or looping via `panic=`-reboot). Never returns. In the QEMU harness the
+/// power-off makes qemu exit, so a failed boot ends the test instead of hanging.
+fn fatal_halt(err: anyhow::Error) -> ! {
+    const GRACE_SECS: libc::c_uint = 60;
+    eprintln!("loader: FATAL: {err:?}");
+    eprintln!("loader: powering off in {GRACE_SECS}s");
+    // SAFETY: PID 1 shutdown path -- flush, wait out the grace window, power off, never return.
+    unsafe {
+        libc::sync();
+        libc::sleep(GRACE_SECS);
+        libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF);
+        // If power-off is somehow refused, park forever rather than exit -> kernel panic.
+        loop {
+            libc::pause();
+        }
+    }
 }
 
 /// Copy stage1's attestation over and drop our own alongside it. Best-effort: the loader must not

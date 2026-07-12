@@ -35,8 +35,8 @@ docker export → mkfs.erofs → veritysetup → zip → append to the loader EL
 5. **Root** — assemble an **overlay**: the verity'd erofs as the immutable lower, a **tmpfs**
    upper. The merged `/` is therefore *pure verity'd erofs at every boot* — runtime writes hit RAM
    and can never persist to shadow the measured code.
-6. **Data (p3)** — bring up `/data`: **authenticated encryption** via `dm-integrity` + `dm-crypt`
-   `aes-gcm-random` (AEAD), grown to fill the disk. Confidential *and* tamper-evident.
+6. **Data (p3)** — bring up `/data`: **dm-crypt** `aes-xts-plain64` (AES-256-XTS), grown online to
+   fill the disk. Confidential; the TPM-derived key binds it to the boot chain.
 7. **Attest** — copy stage1's attestation and drop stage2's alongside it in an ephemeral
    `/run/lockboot/`.
 8. **`switch_root`** onto the overlay and **`exec /init`** — the image's own entrypoint, handed the
@@ -48,8 +48,8 @@ docker export → mkfs.erofs → veritysetup → zip → append to the loader EL
 |---|---|---|
 | **Code / rootfs** | erofs + dm-verity, measured into PCR 14, under an **ephemeral** overlay | Immutable, integrity-verified, re-attestable each boot — no persistent code modification |
 | **Config** | verbatim stdin JSON → hashed → PCR 15 | Disk key bound to config; any change ⇒ fresh disk (fail-closed) |
-| **Data** | `/data`: dm-integrity + dm-crypt `aes-gcm-random` (AEAD) | Confidential **and authenticated** — tampering is detected, not silently served |
-| **Keys** | TPM-derived under a `PolicyPCR` session over a curated PCR set | No LUKS/header; drift in bound PCRs (code/config/firmware) ⇒ re-initialized |
+| **Data** | `/data`: dm-crypt `aes-xts-plain64` (AES-256-XTS) | Confidential. Confidentiality-only: at-rest tampering garbles plaintext rather than being cryptographically detected — media integrity is left to the storage layer (EBS et al.), and a raw-disk-write adversary is out of scope |
+| **Keys** | TPM-derived under a `PolicyPCR` session over a curated PCR set | No LUKS/header; drift in bound PCRs (code/config/firmware) ⇒ superblock decrypts to garbage ⇒ re-initialized (fail-closed) |
 
 See [`PCR-BINDING.md`](PCR-BINDING.md) for the bound PCR set, the {5,10} exclusions, and the IMA
 analysis.
@@ -74,8 +74,8 @@ byte-deterministic. `unzip -l build/<arch>/pack/stage2` inspects a packed payloa
 - **`bootstrap`** — the loader: read the appended payload, bring up persistence, pivot onto the
   overlay root, `exec /init`.
 - **`payload`** — the minimal appended-zip reader (self-extracting; reads `/proc/self/exe`).
-- **`blockdev`** — raw device-mapper ioctls (no `libdevmapper`): dm-verity, dm-integrity + dm-crypt
-  AEAD, byte-stable GPT grow/discovery, ext4 online grow.
+- **`blockdev`** — raw device-mapper ioctls (no `libdevmapper`): dm-verity, dm-crypt (XTS),
+  byte-stable GPT grow/discovery, ext4 online grow.
 - **`tpm-derive`** — deterministic PCR-bound key derivation (pure-Rust TPM2).
 
 ## License
