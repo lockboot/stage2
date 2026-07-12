@@ -1,0 +1,21 @@
+# lockboot:erofs-builder — a BUILD-TIME-ONLY forge for the runtime-image artifacts.
+#
+# Carries mkfs.erofs (erofs-utils) + veritysetup (cryptsetup) + mkfs.ext4 (e2fsprogs). NONE of
+# these ship to the instance: the runtime erofs image holds only static binaries, and p3's ext4
+# base is a baked artifact the kernel mounts/grows itself. This image exists purely to emit
+# reproducible artifacts (see tools/mkruntime.sh).
+#
+# Kept entirely separate from the canonical Dockerfile.build (which the top-level Makefile syncs
+# byte-identically into the harness repos and must stay lean) — nothing here touches it. Alpine
+# is pinned so the tools' *output* is reproducible; the artifacts are byte-verified CI==local.
+# TODO: pin by digest (FROM alpine@sha256:...) once chosen, same discipline as stage1's pins.
+FROM alpine:3.22
+
+RUN apk add --no-cache \
+    erofs-utils \
+    cryptsetup \
+    e2fsprogs \
+    coreutils \
+    zip
+
+WORKDIR /src/stage2

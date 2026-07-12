@@ -1,0 +1,13 @@
+[package]
+name = "tpm-derive"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+# The TPM I/O + deterministic PCR-bound derivation live in vaportpm. Pinned to the
+# v0.3.0 release rev (matches the sibling repos' git-dep style).
+vaportpm-attest = { git = "https://github.com/lockboot/vaportpm", rev = "7041f461eb33bc15ad914466042b7befe358d119", version = "=0.3.0" }

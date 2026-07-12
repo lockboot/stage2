@@ -1,0 +1,41 @@
+.vscode-server
+.ssh
+.gnupg
+.dotnet
+.cache
+.local
+.config
+.gitconfig
+.claude.json
+.claude.json.*
+.claude
+.npm
+.rustup
+.python_history
+.cargo/.global-cache
+.cargo/.package-cache
+.cargo/.package-cache-mutate
+.cargo/git
+.cargo/registry
+.cargo/.crates.toml
+.cargo/.crates2.json
+.cargo/bin/
+target
+node_modules
+test.py
+.wget-hsts
+qemu-9.*
+qemu-10.*
+__pycache__
+old
+.docker
+user-data.json
+user-data.stage0.json
+# Local build outputs: the example-stage2 leaf (build/<arch>/stage2), chain
+# serve-dirs, and the SIGN=1 ed25519 release key (build/keys/) all land here.
+/build/
+.bashrc
+.lesshst
+stage0-trace.*
+# Forward-looking design note (a possible "stage3": gVisor/containerd/control-plane). Local only.
+CONTAINERS.md
