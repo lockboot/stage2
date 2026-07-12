@@ -582,7 +582,8 @@ fn grow_ext4(mountpoint: &str, mapper: &Path) -> Result<()> {
     if unsafe { libc::statvfs(mp.as_ptr(), &mut st) } < 0 {
         return Err(std::io::Error::last_os_error()).context("statvfs data mount");
     }
-    let current = (st.f_blocks as u64) * (st.f_frsize as u64) / EXT4_BLOCK;
+    // f_blocks / f_frsize are c_ulong (= u64 on our LP64 musl targets).
+    let current = st.f_blocks * st.f_frsize / EXT4_BLOCK;
     if target <= current {
         return Ok(());
     }
