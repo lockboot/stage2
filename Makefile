@@ -125,7 +125,6 @@ pack-%: docker-build-base docker-build-erofs
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) \
 		-e SOURCE_DATE_EPOCH -e DATA_SIZE_MB -e ROOTFS_UUID -e VERITY_SALT \
 		$(EROFS_IMAGE) \
-		sh tools/mkruntime.sh \
 			--bootstrap "target/$*-unknown-linux-musl/release/bootstrap" \
 			"target/$*-unknown-linux-musl/release/examples/$(INIT_PAYLOAD)" \
 			"build/$*/pack/stage2"
