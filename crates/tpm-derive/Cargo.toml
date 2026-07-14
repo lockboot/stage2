@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-serde_json = { workspace = true }
 sha2 = { workspace = true }
 # The TPM I/O + deterministic PCR-bound derivation live in vaportpm. Pinned to the
 # v0.3.0 release rev (matches the sibling repos' git-dep style).

@@ -122,25 +122,6 @@ fn ptype(guid: &str, label: &str) -> Type {
     }
 }
 
-/// Map `device` as an `aes-xts-plain64` dm-crypt target named `name`, using the raw
-/// 64-byte (512-bit) `key`, over the whole device. Returns the `/dev/mapper/<name>`
-/// node. No on-disk header: the key is TPM-derived and the ext4 superblock is the
-/// initialized/not signal (see [`crypt_mount_or_mkfs`]).
-pub fn crypt_open(name: &str, device: &Path, key: &[u8; 64]) -> Result<PathBuf> {
-    let sectors = block_device_sectors(device)?;
-    let params = format!(
-        "aes-xts-plain64 {} 0 {} 0",
-        hex(key),
-        device.to_str().context("device path not UTF-8")?
-    );
-    dm::create_and_load(name, "crypt", &params, sectors, false)
-}
-
-/// Tear down a dm-crypt (or any dm) mapping.
-pub fn crypt_close(name: &str) -> Result<()> {
-    dm::remove(name)
-}
-
 /// Size of a block device in 512-byte sectors (via `BLKGETSIZE64`).
 fn block_device_sectors(device: &Path) -> Result<u64> {
     use std::os::fd::AsRawFd;
@@ -412,57 +393,40 @@ fn flush_image(dev: &Path, blob: &[u8]) -> Result<()> {
     Ok(())
 }
 
-// ---- Data partition (p3): dm-integrity + dm-crypt (aes-gcm-random AEAD) + ext4 ----
+// ---- Data partition (p3): dm-crypt (aes-xts-plain64) + ext4 ----
 
-const CRYPT_NAME: &str = "data"; // /dev/mapper/data (the AEAD device ext4 lives on)
-const INTEGRITY_NAME: &str = "data_int"; // /dev/mapper/data_int (tag store beneath crypt)
+const CRYPT_NAME: &str = "data"; // /dev/mapper/data (the encrypted device ext4 lives on)
 const EXT4_BLOCK: u64 = 4096;
 /// ext4 superblock: little-endian magic 0xEF53 at byte offset 0x438.
 const EXT4_MAGIC: u16 = 0xEF53;
 const EXT4_MAGIC_OFFSET: u64 = 0x438;
 /// `EXT4_IOC_RESIZE_FS` = `_IOW('f', 16, __u64)` — in-kernel online grow (no `resize2fs` ships).
 const EXT4_IOC_RESIZE_FS: libc::c_ulong = 0x4008_6610;
-/// dm-integrity superblock: 8-byte magic `"integrt\0"` at offset 0; `provided_data_sectors`
-/// (`__le64`) at offset 16 (the kernel writes it during format; it is the usable size).
-const SB_MAGIC: &[u8; 8] = b"integrt\0";
-const SB_PDS_OFFSET: u64 = 16;
-/// dm-integrity target line tail (after the device): reserved-offset 0, 16-byte AEAD tag, journal
-/// mode, one opt = 4096 block size. **No `internal_hash`** — the tag is supplied by the dm-crypt
-/// AEAD above (via the bio integrity payload).
-const INTEGRITY_OPTS: &str = "0 16 J 1 block_size:4096";
-const WIPE_CHUNK: usize = 4 << 20; // 4 MiB
 
-/// Bring up the authenticated-encrypted data partition (dm-integrity + dm-crypt `aes-gcm-random`)
-/// at `mountpoint` and mount its ext4, grown to fill. **Cold** (fresh device, or the ext4
-/// superblock fails to read back through the AEAD because the key drifted → GCM auth EIO): format
-/// dm-integrity (the kernel does it), **wipe the whole crypt device to initialize every AEAD tag**,
-/// then flush the baked ext4 base. **Warm:** activate, mount, grow. Returns whether it
-/// reinitialized (fail-closed on any drift/corruption).
+/// Bring up the encrypted data partition (dm-crypt `aes-xts-plain64`, confidentiality-only) at
+/// `mountpoint` and mount its ext4, grown to fill p3. **Cold** (fresh device, or the key drifted so
+/// the ext4 superblock decrypts to garbage): flush the baked ext4 base, then mount. **Warm:** the
+/// superblock decrypts cleanly → mount + grow. Returns whether it reinitialized.
 ///
-/// The wipe is mandatory: with no internal hash there is no background tag recalculation, so a
-/// never-written block carries a garbage tag and would EIO on read — every sector must be written
-/// once so it carries a valid tag (a one-time cold-boot cost; warm boots skip it).
+/// XTS is confidentiality-only: there is no per-sector authentication tag, so a never-written sector
+/// decrypts to (deterministic) garbage rather than erroring — which is why online resize needs **no
+/// wipe** (ext4's read-modify-write of new-group metadata reads that garbage and overwrites it, as on
+/// any plain dm-crypt volume; cold-boot cost is independent of volume size). Tamper at rest is
+/// *garbled*, not *detected*: the storage layer (EBS et al.) provides media integrity beneath us, and
+/// an adversary with raw-disk write access is out of scope. Key drift still fails closed: bad
+/// plaintext ⇒ no ext4 magic ⇒ reinit.
 pub fn crypt_mount_or_mkfs(
     part: &Path,
-    key: &[u8; 32],
+    key: &[u8; 64],
     base_image: &[u8],
     mountpoint: &str,
 ) -> Result<bool> {
-    // dm-integrity: on a fresh device the kernel auto-formats; else adopt the on-disk geometry.
-    let formatted = integrity_formatted(part)?;
-    let pds = if formatted {
-        read_provided_data_sectors(part)?
-    } else {
-        format_integrity(part)?
-    };
-    let int_dev = integrity_open(part, pds)?;
-    let mapper = crypt_aead_open(&int_dev, key, pds)?;
+    let mapper = crypt_xts_open(part, key)?;
 
-    // Cold if never formatted, or formatted but the ext4 superblock doesn't verify through the AEAD.
-    let reinit = !formatted || !probe_ext4(&mapper)?;
+    // Cold if the ext4 superblock doesn't decrypt to a valid magic (fresh device or drifted key).
+    let reinit = !probe_ext4(&mapper)?;
     if reinit {
-        wipe_device(&mapper, pds)?; // initialize every AEAD tag before any read
-        flush_image(&mapper, base_image)?; // lay down the baked empty ext4 base
+        flush_image(&mapper, base_image)?; // lay down the baked ext4 base
     }
     // errors=remount-ro: contain damage; the next boot re-derives and decides mount-vs-reinit.
     mount_fs(&mapper, mountpoint, "ext4", 0, Some("errors=remount-ro"))?;
@@ -470,96 +434,26 @@ pub fn crypt_mount_or_mkfs(
     Ok(reinit)
 }
 
-/// Does p3 already carry a dm-integrity superblock (magic at offset 0)?
-fn integrity_formatted(part: &Path) -> Result<bool> {
-    let mut f = File::open(part).with_context(|| format!("open {}", part.display()))?;
-    let mut magic = [0u8; 8];
-    match f.read_exact(&mut magic) {
-        Ok(()) => Ok(&magic == SB_MAGIC),
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
-        Err(e) => Err(e).with_context(|| format!("read integrity magic on {}", part.display())),
-    }
-}
-
-/// Zero the first 4 KiB (arms the kernel auto-format), create a length-8 probe integrity target so
-/// the kernel formats the device + writes `provided_data_sectors`, tear it down (flushing the
-/// superblock), and read the size back.
-fn format_integrity(part: &Path) -> Result<u64> {
-    zero_prefix(part, 4096)?;
-    let params = format!("{} {INTEGRITY_OPTS}", dev_str(part)?);
-    dm::create_and_load(INTEGRITY_NAME, "integrity", &params, 8, false)
-        .context("probe-format dm-integrity")?;
-    dm::remove(INTEGRITY_NAME)?; // flush the freshly-written superblock to p3
-    read_provided_data_sectors(part)
-}
-
-/// Read `provided_data_sectors` (`__le64` @ 16) from p3's dm-integrity superblock.
-fn read_provided_data_sectors(part: &Path) -> Result<u64> {
-    let mut f = File::open(part).with_context(|| format!("open {}", part.display()))?;
-    f.seek(SeekFrom::Start(SB_PDS_OFFSET))?;
-    let mut b = [0u8; 8];
-    f.read_exact(&mut b).context("read provided_data_sectors")?;
-    let pds = u64::from_le_bytes(b);
-    if pds == 0 {
-        bail!("dm-integrity provided_data_sectors is 0 (format failed?)");
-    }
-    Ok(pds)
-}
-
-/// Activate the dm-integrity target over p3 at its provided-data size.
-fn integrity_open(part: &Path, pds: u64) -> Result<PathBuf> {
-    let params = format!("{} {INTEGRITY_OPTS}", dev_str(part)?);
-    dm::create_and_load(INTEGRITY_NAME, "integrity", &params, pds, false)
-}
-
-/// Stack dm-crypt `aes-gcm-random` (AEAD) over the integrity device; the 16-byte GCM tag per
-/// sector is passed down to dm-integrity via the bio integrity payload. 32-byte (aes-256) key.
-fn crypt_aead_open(int_dev: &Path, key: &[u8; 32], pds: u64) -> Result<PathBuf> {
+/// Activate dm-crypt `aes-xts-plain64` over the whole of p3. A 64-byte key = AES-256-XTS (two 256-bit
+/// subkeys); 4096-byte crypto sectors align with ext4's block size.
+fn crypt_xts_open(part: &Path, key: &[u8; 64]) -> Result<PathBuf> {
+    // With sector_size:4096 the mapped length (in 512-byte sectors) must be a multiple of 8; p3 is
+    // not necessarily 4 KiB-aligned, so round down (drops at most 7 tail sectors ~= 3.5 KiB).
+    let sectors = block_device_sectors(part)? & !7;
     let params = format!(
-        "capi:gcm(aes)-random {} 0 {} 0 3 integrity:16:aead sector_size:4096 iv_large_sectors",
+        "aes-xts-plain64 {} 0 {} 0 1 sector_size:4096",
         hex(key),
-        dev_str(int_dev)?
+        dev_str(part)?
     );
-    dm::create_and_load(CRYPT_NAME, "crypt", &params, pds, false)
-}
-
-/// Write `sectors` * 512 zero bytes across `dev` (+ fsync) so every AEAD tag is initialized.
-fn wipe_device(dev: &Path, sectors: u64) -> Result<()> {
-    let mut f = OpenOptions::new()
-        .write(true)
-        .open(dev)
-        .with_context(|| format!("open {} to wipe", dev.display()))?;
-    let zeros = vec![0u8; WIPE_CHUNK];
-    let total = sectors * 512;
-    let mut done = 0u64;
-    while done < total {
-        let n = (total - done).min(WIPE_CHUNK as u64) as usize;
-        f.write_all(&zeros[..n])
-            .with_context(|| format!("wipe {}", dev.display()))?;
-        done += n as u64;
-    }
-    f.sync_all()
-        .with_context(|| format!("flush wipe {}", dev.display()))?;
-    Ok(())
-}
-
-/// Zero the first `len` bytes of `dev` (+ fsync).
-fn zero_prefix(dev: &Path, len: usize) -> Result<()> {
-    let mut f = OpenOptions::new()
-        .write(true)
-        .open(dev)
-        .with_context(|| format!("open {} to zero prefix", dev.display()))?;
-    f.write_all(&vec![0u8; len]).context("zero prefix")?;
-    f.sync_all().context("flush zero prefix")?;
-    Ok(())
+    dm::create_and_load(CRYPT_NAME, "crypt", &params, sectors, false)
 }
 
 fn dev_str(dev: &Path) -> Result<&str> {
     dev.to_str().context("device path not UTF-8")
 }
 
-/// Is there an ext4 superblock readable *through* `dev` (magic 0xEF53 at 0x438)? A GCM auth failure
-/// (drifted key) surfaces as EIO, which we treat as "not valid" ⇒ reinit.
+/// Is there an ext4 superblock readable *through* `dev` (magic 0xEF53 at 0x438)? Under XTS a drifted
+/// key decrypts the superblock to garbage, so the magic simply won't match ⇒ reinit (fail closed).
 fn probe_ext4(dev: &Path) -> Result<bool> {
     let mut f = File::open(dev).with_context(|| format!("open {}", dev.display()))?;
     f.seek(SeekFrom::Start(EXT4_MAGIC_OFFSET))?;
