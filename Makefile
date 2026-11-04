@@ -27,7 +27,7 @@ docker-build-base:
 # Build-time-only forge for the runtime-image artifacts (mkfs.erofs + veritysetup + mkfs.ext4);
 # nothing it produces ships to the instance. See Dockerfile.erofs-builder + tools/mkruntime.sh.
 docker-build-erofs:
-	docker build -f Dockerfile.erofs-builder -t $(EROFS_IMAGE) .
+	docker build -f Dockerfile.erofs-builder --target tools -t $(EROFS_IMAGE) .
 
 # ---- Docker run plumbing (keep identical across repos; mirrors stage0/stage1) ----
 USER_ID  := $(shell stat -c %u .)
