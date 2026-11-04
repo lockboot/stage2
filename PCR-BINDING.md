@@ -198,18 +198,6 @@ dm-verity). Revisit only if binding the GPT itself becomes desirable.
 securityfs first) on both boots and diff — expected to show the boot aggregate as the only
 varying entry, and to enumerate exactly which modules IMA measures.
 
-## How to reproduce / investigate
-
-```bash
-# In-guest reboot test (two boots, one QEMU invocation), prints key_fp + all 24 PCRs/boot:
-make test-persist-x86_64 PERSIST_PAYLOAD=reboot-probe
-# Diff the two boots' pcrNN= lines to see which PCRs move.
-```
-
-- `tpm_derive::read_all_pcrs()` — reads all 24 PCRs (SHA-256 bank) for cross-boot diffing.
-- `reboot-probe` prints `key_fp`, the raw p3 ciphertext at the sentinel offset, and every
-  PCR on each boot.
-
 ## References
 
 - TCG PC Client Platform Firmware Profile — PCR usage, `EV_EFI_GPT_EVENT`, `EV_EFI_ACTION`,
