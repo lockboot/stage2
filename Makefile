@@ -174,4 +174,35 @@ test-pivot-%: pack-%
 		-e YES_INSIDE_DOCKER_DO_DANGEROUS_IPTABLES=1 --cap-add=NET_ADMIN --device=/dev/net/tun \
 		$(HARNESS_IMAGE) --kind stage0 --arch $* \
 			--boot-disk "$$D/boot.disk" \
-			--serve-dir "$$D" --user-data "$$D/user-data.json"
+			--serve-dir "$$D" --user-data "$$D/user-data.json" \
+			$(if $(HARNESS_TIMEOUT),--timeout $(HARNESS_TIMEOUT))
+
+# ---- Self-test: stage2's part of the workspace `make selftest` (PASS/FAIL, non-zero on FAIL) ----
+# Two full-chain boots through test-pivot:
+#   pivot  pivot-init on the default grown disk: config + attestation + /data resize + persistence
+#          + overlay-root ephemerality across an in-guest reboot (PIVOT_TEST=PASS).
+#   grow   grow-probe on a 10 GiB sparse grow: /data grows past one ext4 meta_bg (~8 GiB), fresh
+#          read/write, sparse hole reads zero (GROW_TEST=PASS). The sparse file costs no host disk;
+#          the time is guest-side resize + I/O (~30 s measured on both arches).
+# Every boot is time-bounded (HARNESS_TIMEOUT -> qemu-test.sh --timeout). Needs the sibling stage0
+# boot.disk + stage1 UKI and the lockboot:harness image (workspace `make selftest-<arch>`).
+SELFTEST_TIMEOUT_x86_64  ?= 300
+SELFTEST_TIMEOUT_aarch64 ?= 300
+.PHONY: selftest
+selftest:
+	@echo "needs an arch suffix, e.g. 'make selftest-x86_64'." >&2; exit 2
+selftest-%:
+	@fail=0; T=$(SELFTEST_TIMEOUT_$*); sum="build/$*/selftest.summary"; mkdir -p build/$*; : > "$$sum"; \
+	for m in "pivot:PIVOT_TEST=PASS:INIT_PAYLOAD=pivot-init" "grow:GROW_TEST=PASS:INIT_PAYLOAD=grow-probe PERSIST_GROW=10G"; do \
+		name="$${m%%:*}"; rest="$${m#*:}"; marker="$${rest%%:*}"; vars="$${rest#*:}"; \
+		log="build/$*/selftest-$$name.log"; \
+		echo "==================== stage2 test [$$name] $$vars -> $$log"; \
+		$(MAKE) --no-print-directory test-pivot-$* $$vars HARNESS_TIMEOUT=$$T > "$$log" 2>&1 || true; \
+		if grep -q "$$marker" "$$log"; then \
+			echo "PASS [$$name]" | tee -a "$$sum"; \
+		else \
+			echo "FAIL [$$name] (see $$log)" | tee -a "$$sum"; fail=1; \
+		fi; \
+	done; \
+	echo "==================== stage2 self-test summary ($*)"; cat "$$sum"; \
+	if [ "$$fail" = 0 ]; then echo "ALL STAGE2 SELF-TESTS PASSED ($*)"; else echo "SOME STAGE2 SELF-TESTS FAILED ($*)"; exit 1; fi
