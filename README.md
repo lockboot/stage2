@@ -21,7 +21,7 @@ packaging: `docker export → mkfs.erofs → veritysetup → zip → append to t
 
 ### From a release
 
-Each `stage2-v*` release publishes a multi-arch (`linux/amd64` + `linux/arm64`) erofs-builder image
+Each `v*` release publishes a multi-arch (`linux/amd64` + `linux/arm64`) erofs-builder image
 with that release's loaders for both arches baked in, so there is no separate loader download. Pin
 it by the digest in the release notes, and verify its provenance first:
 
