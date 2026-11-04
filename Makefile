@@ -11,7 +11,7 @@
 # The container image travels as a self-extracting zip appended to the loader (make pack);
 # tests borrow the stage0 harness + existing swtpm, exactly as stage1's chain test does.
 
-.PHONY: all lock check test fmt fmt-fix clippy ci build build-x86_64 build-aarch64 clean docker-build-base docker-build-erofs docker-shell-base pack
+.PHONY: all lock check test fmt fmt-fix clippy ci build build-amd64 build-x86_64 build-arm64 build-aarch64 clean docker-build-base docker-build-erofs docker-shell-base pack pack-amd64 pack-arm64
 
 ARCHS = x86_64 aarch64
 all: build
@@ -101,6 +101,8 @@ ci: docker-build-base
 
 # ---- Build the loader (payload-agnostic; the image is appended separately by `pack`) ----
 build: build-x86_64
+build-amd64: build-x86_64
+build-arm64: build-aarch64
 build-x86_64 build-aarch64: build-%:
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) bash -c "\
 		rustup target add $*-unknown-linux-musl && \
@@ -116,6 +118,8 @@ INIT_PAYLOAD ?= pivot-init
 pack:
 	@echo "needs an arch suffix, e.g. 'make pack-x86_64'." >&2; exit 2
 
+pack-amd64: pack-x86_64
+pack-arm64: pack-aarch64
 pack-%: docker-build-base docker-build-erofs
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) bash -c "\
 		rustup target add $*-unknown-linux-musl && \
