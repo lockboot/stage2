@@ -138,74 +138,14 @@ clean:
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) $(CARGO) clean
 
 # ---- Boot-through-harness test (borrows the sibling stage0 boot.disk + stage1 UKI) ----
-# Boots stage0 -> stage1 UKI -> our payload under QEMU/KVM + swtpm, exactly as stage1's
-# chain test does. PAYLOAD selects which built example/bin to admit as stage2 (default: the
-# derive probe). sha256 admission; no signing needed for a local boot test.
+# Boots stage0 -> stage1 UKI -> our packed stage2 under QEMU/KVM + swtpm, exactly as stage1's
+# chain test does. sha256 admission; no signing needed for a local boot test.
 STAGE0_DIR       ?= ../stage0
 STAGE0_BOOT_DISK ?= $(STAGE0_DIR)/build/$*/boot.disk
 STAGE1_DIR       ?= ../stage1
 STAGE1_UKI       ?= $(STAGE1_DIR)/tools/build-uki/$*/linux.efi
 SERVE_HOST       ?= 10.0.2.1:8000
-PAYLOAD          ?= derive-probe
 PERSIST_GROW     ?= 268435456   # bytes to grow the boot.disk copy (room for p2 + p3)
-PERSIST_PAYLOAD  ?= blockdev-probe
-
-.PHONY: test-chain
-test-chain:
-	@echo "needs an arch suffix, e.g. 'make test-chain-x86_64'." >&2; exit 2
-
-test-chain-%:
-	@[ -f "$(STAGE0_BOOT_DISK)" ] || { echo "missing stage0 boot.disk: $(STAGE0_BOOT_DISK)  (cd $(STAGE0_DIR) && make build-$*)" >&2; exit 1; }
-	@[ -f "$(STAGE1_UKI)" ] || { echo "missing stage1 UKI: $(STAGE1_UKI)  (cd $(STAGE1_DIR) && make $*)" >&2; exit 1; }
-	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) bash -c "\
-		rustup target add $*-unknown-linux-musl && \
-		$(CARGO) build --release --locked --target $*-unknown-linux-musl \
-			-p bootstrap --example $(PAYLOAD)"
-	@D="build/$*/chain"; rm -rf "$$D"; mkdir -p "$$D"; H="http://$(SERVE_HOST)"; \
-	cp "$(STAGE1_UKI)" "$$D/linux.efi"; \
-	cp "target/$*-unknown-linux-musl/release/examples/$(PAYLOAD)" "$$D/stage2"; \
-	UKI_SHA=$$(sha256sum "$$D/linux.efi" | cut -d' ' -f1); \
-	S2_SHA=$$(sha256sum "$$D/stage2" | cut -d' ' -f1); \
-	printf '{\n  "_stage1": { "%s": { "payload": { "url": "%s/linux.efi", "sha256": "%s" } } },\n  "_stage2": { "%s": { "payload": { "url": "%s/stage2", "sha256": "%s" } } }\n}\n' \
-		"$*" "$$H" "$$UKI_SHA" "$*" "$$H" "$$S2_SHA" > "$$D/user-data.json"; \
-	echo "user-data: UKI $$UKI_SHA  stage2($(PAYLOAD)) $$S2_SHA"; \
-	$(DOCKER_RUN) $(DOCKER_OPT_KVM) \
-		-e YES_INSIDE_DOCKER_DO_DANGEROUS_IPTABLES=1 --cap-add=NET_ADMIN --device=/dev/net/tun \
-		$(HARNESS_IMAGE) --kind stage0 --arch $* \
-			--boot-disk "$(STAGE0_BOOT_DISK)" \
-			--serve-dir "$$D" --user-data "$$D/user-data.json"
-
-# ---- Persistence dry-run: GPT rebuild + kernel re-read + dm-crypt on a GROWN disk ----
-# Like test-chain, but boots a WRITABLE, grown copy of stage0's boot.disk so blockdev can
-# add p2/p3 into the new tail. Admits the blockdev-probe (partition -> dm-crypt -> sentinel).
-.PHONY: test-persist
-test-persist:
-	@echo "needs an arch suffix, e.g. 'make test-persist-x86_64'." >&2; exit 2
-
-test-persist-%:
-	@[ -f "$(STAGE0_BOOT_DISK)" ] || { echo "missing stage0 boot.disk: $(STAGE0_BOOT_DISK)" >&2; exit 1; }
-	@[ -f "$(STAGE1_UKI)" ] || { echo "missing stage1 UKI: $(STAGE1_UKI)" >&2; exit 1; }
-	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) bash -c "\
-		rustup target add $*-unknown-linux-musl && \
-		$(CARGO) build --release --locked --target $*-unknown-linux-musl \
-			-p bootstrap --example $(PERSIST_PAYLOAD)"
-	@D="build/$*/persist"; rm -rf "$$D"; mkdir -p "$$D"; H="http://$(SERVE_HOST)"; \
-	cp "$(STAGE1_UKI)" "$$D/linux.efi"; \
-	cp "target/$*-unknown-linux-musl/release/examples/$(PERSIST_PAYLOAD)" "$$D/stage2"; \
-	cp "$(STAGE0_BOOT_DISK)" "$$D/boot.disk"; \
-	cp "$$(dirname "$(STAGE0_BOOT_DISK)")/efi-vars.ovmf" "$$D/efi-vars.ovmf"; \
-	truncate -s +$(PERSIST_GROW) "$$D/boot.disk"; \
-	echo "grown boot.disk -> $$(stat -c%s "$$D/boot.disk") bytes"; \
-	UKI_SHA=$$(sha256sum "$$D/linux.efi" | cut -d' ' -f1); \
-	S2_SHA=$$(sha256sum "$$D/stage2" | cut -d' ' -f1); \
-	printf '{\n  "_stage1": { "%s": { "payload": { "url": "%s/linux.efi", "sha256": "%s" } } },\n  "_stage2": { "%s": { "payload": { "url": "%s/stage2", "sha256": "%s" } } }\n}\n' \
-		"$*" "$$H" "$$UKI_SHA" "$*" "$$H" "$$S2_SHA" > "$$D/user-data.json"; \
-	echo "user-data: UKI $$UKI_SHA  stage2($(PERSIST_PAYLOAD)) $$S2_SHA"; \
-	$(DOCKER_RUN) $(DOCKER_OPT_KVM) \
-		-e YES_INSIDE_DOCKER_DO_DANGEROUS_IPTABLES=1 --cap-add=NET_ADMIN --device=/dev/net/tun \
-		$(HARNESS_IMAGE) --kind stage0 --arch $* \
-			--boot-disk "$$D/boot.disk" \
-			--serve-dir "$$D" --user-data "$$D/user-data.json"
 
 # ---- Full loader test: verity erofs root under an ephemeral overlay + encrypted /data + pivot ----
 # `pack`s the loader + a pivot-init /init into a stage2 (loader ELF + appended payload.zip), then
