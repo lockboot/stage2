@@ -12,19 +12,32 @@
 # of what the script uses -- touch -d @epoch, stat -c, tar, install, awk -- so no coreutils.
 #
 # Kept entirely separate from the canonical Dockerfile.build (which the top-level Makefile syncs
-# byte-identically into the harness repos and must stay lean) — nothing here touches it. Alpine
-# is pinned so the tools' *output* is reproducible; the artifacts are byte-verified CI==local.
-# TODO: pin by digest (FROM alpine@sha256:...) once chosen, same discipline as stage1's pins.
-FROM alpine:3.22
+# byte-identically into the harness repos and must stay lean) -- nothing here touches it.
+#
+# This is an END-USER artifact: its tools determine the bytes of rootfs.erofs + the verity root,
+# i.e. the packed stage2's hash and what PCR14 sees. So the base is pinned by digest (multi-arch
+# index) and every package by exact version -- a rebuild after Alpine moves a package fails loudly
+# instead of silently forging a different payload. Bump pins together and re-verify CI==local.
+#
+# Two stages:
+#   tools    the forge alone; `make docker-build-erofs` builds this for local dev, where `make pack`
+#            passes a freshly built loader via --bootstrap.
+#   release  tools + the release's attested stage2-loader-{x86_64,aarch64} (from the build
+#            context), so `--arch <arch>` packs with the released loader -- no separate download.
+#            Published multi-arch (linux/amd64 + linux/arm64) to ghcr on stage2-v* tags.
+FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f AS tools
 
 RUN apk add --no-cache \
-    erofs-utils \
-    cryptsetup \
-    e2fsprogs \
-    zip
+    erofs-utils=1.8.6-r0 \
+    cryptsetup=2.7.5-r1 \
+    e2fsprogs=1.47.2-r2 \
+    zip=3.0-r13
 
 COPY tools/mkruntime.sh /usr/local/bin/mkruntime
 RUN chmod 0755 /usr/local/bin/mkruntime
 
 WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/mkruntime"]
+
+FROM tools AS release
+COPY --chmod=0755 stage2-loader-x86_64 stage2-loader-aarch64 /usr/local/share/lockboot/
