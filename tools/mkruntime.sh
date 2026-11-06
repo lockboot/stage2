@@ -8,7 +8,8 @@
 #                  fill the disk; meta_bg => unbounded growth).
 #   verity.json    { root_hash, salt, data_blocks } for the loader (payload::Verity).
 # With --bootstrap, the loader ELF is prepended and the zip self-adjusted, so the output is a
-# ready-to-run packed stage2 (what `make pack` produces) instead of a bare zip.
+# ready-to-run packed stage2 (what `make pack` produces) instead of a bare zip. The released image
+# bakes in the release's loaders for both arches; --arch <x86_64|aarch64> selects one of those.
 #
 # Reproducible: with default knobs the output is byte-identical across builds (fixed UUID + salt,
 # SOURCE_DATE_EPOCH, no lazy init, fixed mtimes + `zip -X`). Byte-verified CI==local.
@@ -18,10 +19,11 @@ usage() {
     cat <<'EOF'
 mkruntime.sh -- forge the deterministic stage2 payload (runs in lockboot:erofs-builder).
 
-Usage: mkruntime.sh [--bootstrap <elf>] <rootfs> <out>
+Usage: mkruntime.sh [--arch <x86_64|aarch64> | --bootstrap <elf>] <rootfs> <out>
 
-  --bootstrap <elf>   prepend this loader ELF and self-adjust the zip, so <out> is a
-                      ready-to-run packed stage2 (ELF + payload) instead of a bare zip.
+  --arch <arch>       prepend the loader for <arch> baked into this image (the released
+                      stage2-loader-<arch>), so <out> is a ready-to-run packed stage2.
+  --bootstrap <elf>   prepend this loader ELF instead (e.g. a local build), same result.
   <rootfs>   one of:
                -            read a tar stream on stdin (a container rootfs)
                <file.tar>   a tar archive of a container rootfs
@@ -39,23 +41,36 @@ Examples:
   # bare payload.zip from a single static PID-1 binary:
   mkruntime.sh ./myinit payload.zip
 
-  # a ready-to-run stage2 from a Docker image (no docker dependency baked in here):
+  # a ready-to-run aarch64 stage2 from a Docker image, using the baked-in loader:
   docker export "$(docker create --rm myimage)" | \
-      mkruntime.sh --bootstrap ./bootstrap - stage2
+      mkruntime.sh --arch aarch64 - stage2
 EOF
 }
 
+LOADER_DIR=/usr/local/share/lockboot
 BOOTSTRAP=""
+ARCH=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --bootstrap) BOOTSTRAP="${2:?--bootstrap needs an <elf> path}"; shift 2 ;;
         --bootstrap=*) BOOTSTRAP="${1#*=}"; shift ;;
+        --arch) ARCH="${2:?--arch needs x86_64 or aarch64}"; shift 2 ;;
+        --arch=*) ARCH="${1#*=}"; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         --*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
         *) break ;;                 # positional (rootfs); includes "-" for stdin
     esac
 done
+
+if [ -n "$ARCH" ]; then
+    [ -z "$BOOTSTRAP" ] || { echo "--arch and --bootstrap are mutually exclusive" >&2; exit 2; }
+    case "$ARCH" in
+        x86_64|aarch64) BOOTSTRAP="$LOADER_DIR/stage2-loader-$ARCH" ;;
+        *) echo "--arch: expected x86_64 or aarch64, got: $ARCH" >&2; exit 2 ;;
+    esac
+    [ -f "$BOOTSTRAP" ] || { echo "--arch: no baked loader at $BOOTSTRAP (dev image? use --bootstrap)" >&2; exit 1; }
+fi
 
 SRC_ROOTFS="${1:?missing <rootfs>; see 'mkruntime.sh --help'}"
 OUT="${2:?missing <out>; see 'mkruntime.sh --help'}"

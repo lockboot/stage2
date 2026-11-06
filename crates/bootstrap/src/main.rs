@@ -87,6 +87,17 @@ fn run() -> Result<()> {
     )
     .context("mount overlay root")?;
 
+    // The resolver stage1 learned by DHCP (udhcpc writes it to our /etc). The workload's image
+    // carries only an empty placeholder (docker export leaves one), so without this it resolves
+    // nothing, and musl falls back to 127.0.0.1 and times out. Written to the tmpfs upper: the
+    // image is untouched, and it's DHCP's data, untrusted like the network it describes.
+    // Best-effort: a workload that needs no DNS boots either way.
+    if let Ok(conf) = std::fs::read("/etc/resolv.conf") {
+        if let Err(e) = std::fs::write(format!("{NEWROOT}/etc/resolv.conf"), conf) {
+            eprintln!("loader: resolv.conf not passed on: {e}");
+        }
+    }
+
     // Encrypted persistent /data inside the new root — the ONLY thing that survives a reboot.
     pivot::mkdir(DATA);
     let reinit = blockdev::crypt_mount_or_mkfs(&data_part, &key, &payload.data_base, DATA)
