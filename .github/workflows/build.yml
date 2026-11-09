@@ -45,6 +45,7 @@ jobs:
         run: |
           make pack-${{ matrix.arch }}
           cp target/${{ matrix.arch }}-unknown-linux-musl/release/bootstrap stage2-loader-${{ matrix.arch }}
+          cp tools/stage2.replay.json .
 
       # The reusable loader binary + a packed demo (loader + the pivot-init /init) for inspection
       # (`unzip -l`) or a local boot test.
@@ -54,6 +55,7 @@ jobs:
           name: stage2-${{ matrix.arch }}
           path: |
             stage2-loader-${{ matrix.arch }}
+            stage2.replay.json
             build/${{ matrix.arch }}/pack/stage2
 
   # ---- Release track (tag: v*): the reusable loader binaries ---------
@@ -79,6 +81,7 @@ jobs:
           subject-path: |
             stage2-loader-x86_64
             stage2-loader-aarch64
+            stage2.replay.json
 
       - name: Create release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
@@ -87,6 +90,7 @@ jobs:
           files: |
             stage2-loader-x86_64
             stage2-loader-aarch64
+            stage2.replay.json
           draft: false
           prerelease: true
           generate_release_notes: true

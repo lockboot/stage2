@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Boot-through-harness `/init` that prints the PCR state the payload starts with: every PCR in
-//! every bank as `PCR <bank> <nn> <hex>` (the format the predict-pcrs.py `--check` mode reads),
+//! every bank as `PCR <bank> <nn> <hex>` (the format workspace tools/pcr-replay `--check` reads),
 //! plus the sha256 of the config the loader forwarded on stdin (the digest bound into PCR15).
 //! Runs as PID 1 after the loader has pivoted (/sys is moved in). Not production.
 
@@ -27,6 +27,10 @@ fn main() {
         }
     }
     println!("=== PCR-DUMP-END ===");
+    // Let the console drain before powering off: a 115200-baud serial console is still sending
+    // the last lines when the kernel powers down (GCP lost the tail of the dump without this).
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::thread::sleep(std::time::Duration::from_secs(3));
     // SAFETY: PID 1 power-off; sync then poweroff.
     unsafe {
         libc::sync();
