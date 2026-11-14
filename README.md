@@ -19,6 +19,24 @@ packaging: `docker export → mkfs.erofs → veritysetup → zip → append to t
 
 ## Using it
 
+### From a release
+
+Each `v*` release publishes a multi-arch (`linux/amd64` + `linux/arm64`) erofs-builder image
+with that release's loaders for both arches baked in, so there is no separate loader download. Pin
+it by the digest in the release notes, and verify its provenance first:
+
+```bash
+IMG=ghcr.io/lockboot/stage2-erofs-builder@sha256:<digest from the release notes>
+gh attestation verify "oci://$IMG" --repo lockboot/stage2
+docker export "$(docker create --rm myimage)" \
+  | docker run --rm -i "$IMG" --arch aarch64 - - > stage2     # or --arch x86_64
+```
+
+`--arch` picks the target arch of the loader, independent of the host's: an amd64 host can pack an
+aarch64 stage2 and vice versa, with identical output.
+
+### From source
+
 Build the loader and the packaging image once:
 
 ```bash

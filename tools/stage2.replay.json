@@ -1,0 +1,21 @@
+{
+  "schema": "pcr-replay/v1",
+  "name": "stage2",
+  "about": "The stage2 loader, from stage1's handoff to its payload's /init: it binds the config it was handed (stdin) into PCR15. The config bytes are the user-data document verbatim when _stage2 was admitted directly, or stage1's re-serialization of the manifest-merged document when it was resolved through a signed manifest. A verifier needs only their sha256, which the operator can disclose without the contents (stage2 records it in /run/lockboot/stage2.attest); the hash hides the config only if it is not guessable, so include a random nonce if that matters. Same for both arches; static (workspace tools/pcr-replay verifies it).",
+  "inputs": {
+    "config": {"about": "sha256 of the exact config bytes stage2 received on stdin"}
+  },
+  "unextended": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23],
+  "unpredictable": {"10": "IMA (the kernel's own measurement log)"},
+  "events": [
+    {
+      "pcr": 15,
+      "type": "unlogged",
+      "by": "stage2",
+      "about": "TPM2_PCR_Extend with the raw sha256(config), sha256 bank only (tpm-derive extend_config_pcr); other banks' PCR15 stay at reset",
+      "derive": {"input": "config"},
+      "digest": "raw",
+      "banks": ["sha256"]
+    }
+  ]
+}

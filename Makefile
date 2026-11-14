@@ -11,7 +11,7 @@
 # The container image travels as a self-extracting zip appended to the loader (make pack);
 # tests borrow the stage0 harness + existing swtpm, exactly as stage1's chain test does.
 
-.PHONY: all lock check test fmt fmt-fix clippy ci build build-x86_64 build-aarch64 clean docker-build-base docker-build-erofs docker-shell-base pack
+.PHONY: all lock check test fmt fmt-fix clippy ci build build-amd64 build-x86_64 build-arm64 build-aarch64 clean docker-build-base docker-build-erofs docker-shell-base pack pack-amd64 pack-arm64
 
 ARCHS = x86_64 aarch64
 all: build
@@ -27,7 +27,7 @@ docker-build-base:
 # Build-time-only forge for the runtime-image artifacts (mkfs.erofs + veritysetup + mkfs.ext4);
 # nothing it produces ships to the instance. See Dockerfile.erofs-builder + tools/mkruntime.sh.
 docker-build-erofs:
-	docker build -f Dockerfile.erofs-builder -t $(EROFS_IMAGE) .
+	docker build -f Dockerfile.erofs-builder --target tools -t $(EROFS_IMAGE) .
 
 # ---- Docker run plumbing (keep identical across repos; mirrors stage0/stage1) ----
 USER_ID  := $(shell stat -c %u .)
@@ -101,6 +101,8 @@ ci: docker-build-base
 
 # ---- Build the loader (payload-agnostic; the image is appended separately by `pack`) ----
 build: build-x86_64
+build-amd64: build-x86_64
+build-arm64: build-aarch64
 build-x86_64 build-aarch64: build-%:
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) bash -c "\
 		rustup target add $*-unknown-linux-musl && \
@@ -116,6 +118,8 @@ INIT_PAYLOAD ?= pivot-init
 pack:
 	@echo "needs an arch suffix, e.g. 'make pack-x86_64'." >&2; exit 2
 
+pack-amd64: pack-x86_64
+pack-arm64: pack-aarch64
 pack-%: docker-build-base docker-build-erofs
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) bash -c "\
 		rustup target add $*-unknown-linux-musl && \
@@ -134,74 +138,14 @@ clean:
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) $(CARGO) clean
 
 # ---- Boot-through-harness test (borrows the sibling stage0 boot.disk + stage1 UKI) ----
-# Boots stage0 -> stage1 UKI -> our payload under QEMU/KVM + swtpm, exactly as stage1's
-# chain test does. PAYLOAD selects which built example/bin to admit as stage2 (default: the
-# derive probe). sha256 admission; no signing needed for a local boot test.
+# Boots stage0 -> stage1 UKI -> our packed stage2 under QEMU/KVM + swtpm, exactly as stage1's
+# chain test does. sha256 admission; no signing needed for a local boot test.
 STAGE0_DIR       ?= ../stage0
 STAGE0_BOOT_DISK ?= $(STAGE0_DIR)/build/$*/boot.disk
 STAGE1_DIR       ?= ../stage1
 STAGE1_UKI       ?= $(STAGE1_DIR)/tools/build-uki/$*/linux.efi
 SERVE_HOST       ?= 10.0.2.1:8000
-PAYLOAD          ?= derive-probe
 PERSIST_GROW     ?= 268435456   # bytes to grow the boot.disk copy (room for p2 + p3)
-PERSIST_PAYLOAD  ?= blockdev-probe
-
-.PHONY: test-chain
-test-chain:
-	@echo "needs an arch suffix, e.g. 'make test-chain-x86_64'." >&2; exit 2
-
-test-chain-%:
-	@[ -f "$(STAGE0_BOOT_DISK)" ] || { echo "missing stage0 boot.disk: $(STAGE0_BOOT_DISK)  (cd $(STAGE0_DIR) && make build-$*)" >&2; exit 1; }
-	@[ -f "$(STAGE1_UKI)" ] || { echo "missing stage1 UKI: $(STAGE1_UKI)  (cd $(STAGE1_DIR) && make $*)" >&2; exit 1; }
-	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) bash -c "\
-		rustup target add $*-unknown-linux-musl && \
-		$(CARGO) build --release --locked --target $*-unknown-linux-musl \
-			-p bootstrap --example $(PAYLOAD)"
-	@D="build/$*/chain"; rm -rf "$$D"; mkdir -p "$$D"; H="http://$(SERVE_HOST)"; \
-	cp "$(STAGE1_UKI)" "$$D/linux.efi"; \
-	cp "target/$*-unknown-linux-musl/release/examples/$(PAYLOAD)" "$$D/stage2"; \
-	UKI_SHA=$$(sha256sum "$$D/linux.efi" | cut -d' ' -f1); \
-	S2_SHA=$$(sha256sum "$$D/stage2" | cut -d' ' -f1); \
-	printf '{\n  "_stage1": { "%s": { "payload": { "url": "%s/linux.efi", "sha256": "%s" } } },\n  "_stage2": { "%s": { "payload": { "url": "%s/stage2", "sha256": "%s" } } }\n}\n' \
-		"$*" "$$H" "$$UKI_SHA" "$*" "$$H" "$$S2_SHA" > "$$D/user-data.json"; \
-	echo "user-data: UKI $$UKI_SHA  stage2($(PAYLOAD)) $$S2_SHA"; \
-	$(DOCKER_RUN) $(DOCKER_OPT_KVM) \
-		-e YES_INSIDE_DOCKER_DO_DANGEROUS_IPTABLES=1 --cap-add=NET_ADMIN --device=/dev/net/tun \
-		$(HARNESS_IMAGE) --kind stage0 --arch $* \
-			--boot-disk "$(STAGE0_BOOT_DISK)" \
-			--serve-dir "$$D" --user-data "$$D/user-data.json"
-
-# ---- Persistence dry-run: GPT rebuild + kernel re-read + dm-crypt on a GROWN disk ----
-# Like test-chain, but boots a WRITABLE, grown copy of stage0's boot.disk so blockdev can
-# add p2/p3 into the new tail. Admits the blockdev-probe (partition -> dm-crypt -> sentinel).
-.PHONY: test-persist
-test-persist:
-	@echo "needs an arch suffix, e.g. 'make test-persist-x86_64'." >&2; exit 2
-
-test-persist-%:
-	@[ -f "$(STAGE0_BOOT_DISK)" ] || { echo "missing stage0 boot.disk: $(STAGE0_BOOT_DISK)" >&2; exit 1; }
-	@[ -f "$(STAGE1_UKI)" ] || { echo "missing stage1 UKI: $(STAGE1_UKI)" >&2; exit 1; }
-	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) bash -c "\
-		rustup target add $*-unknown-linux-musl && \
-		$(CARGO) build --release --locked --target $*-unknown-linux-musl \
-			-p bootstrap --example $(PERSIST_PAYLOAD)"
-	@D="build/$*/persist"; rm -rf "$$D"; mkdir -p "$$D"; H="http://$(SERVE_HOST)"; \
-	cp "$(STAGE1_UKI)" "$$D/linux.efi"; \
-	cp "target/$*-unknown-linux-musl/release/examples/$(PERSIST_PAYLOAD)" "$$D/stage2"; \
-	cp "$(STAGE0_BOOT_DISK)" "$$D/boot.disk"; \
-	cp "$$(dirname "$(STAGE0_BOOT_DISK)")/efi-vars.ovmf" "$$D/efi-vars.ovmf"; \
-	truncate -s +$(PERSIST_GROW) "$$D/boot.disk"; \
-	echo "grown boot.disk -> $$(stat -c%s "$$D/boot.disk") bytes"; \
-	UKI_SHA=$$(sha256sum "$$D/linux.efi" | cut -d' ' -f1); \
-	S2_SHA=$$(sha256sum "$$D/stage2" | cut -d' ' -f1); \
-	printf '{\n  "_stage1": { "%s": { "payload": { "url": "%s/linux.efi", "sha256": "%s" } } },\n  "_stage2": { "%s": { "payload": { "url": "%s/stage2", "sha256": "%s" } } }\n}\n' \
-		"$*" "$$H" "$$UKI_SHA" "$*" "$$H" "$$S2_SHA" > "$$D/user-data.json"; \
-	echo "user-data: UKI $$UKI_SHA  stage2($(PERSIST_PAYLOAD)) $$S2_SHA"; \
-	$(DOCKER_RUN) $(DOCKER_OPT_KVM) \
-		-e YES_INSIDE_DOCKER_DO_DANGEROUS_IPTABLES=1 --cap-add=NET_ADMIN --device=/dev/net/tun \
-		$(HARNESS_IMAGE) --kind stage0 --arch $* \
-			--boot-disk "$$D/boot.disk" \
-			--serve-dir "$$D" --user-data "$$D/user-data.json"
 
 # ---- Full loader test: verity erofs root under an ephemeral overlay + encrypted /data + pivot ----
 # `pack`s the loader + a pivot-init /init into a stage2 (loader ELF + appended payload.zip), then
@@ -230,4 +174,35 @@ test-pivot-%: pack-%
 		-e YES_INSIDE_DOCKER_DO_DANGEROUS_IPTABLES=1 --cap-add=NET_ADMIN --device=/dev/net/tun \
 		$(HARNESS_IMAGE) --kind stage0 --arch $* \
 			--boot-disk "$$D/boot.disk" \
-			--serve-dir "$$D" --user-data "$$D/user-data.json"
+			--serve-dir "$$D" --user-data "$$D/user-data.json" \
+			$(if $(HARNESS_TIMEOUT),--timeout $(HARNESS_TIMEOUT))
+
+# ---- Self-test: stage2's part of the workspace `make selftest` (PASS/FAIL, non-zero on FAIL) ----
+# Two full-chain boots through test-pivot:
+#   pivot  pivot-init on the default grown disk: config + attestation + /data resize + persistence
+#          + overlay-root ephemerality across an in-guest reboot (PIVOT_TEST=PASS).
+#   grow   grow-probe on a 10 GiB sparse grow: /data grows past one ext4 meta_bg (~8 GiB), fresh
+#          read/write, sparse hole reads zero (GROW_TEST=PASS). The sparse file costs no host disk;
+#          the time is guest-side resize + I/O (~30 s measured on both arches).
+# Every boot is time-bounded (HARNESS_TIMEOUT -> qemu-test.sh --timeout). Needs the sibling stage0
+# boot.disk + stage1 UKI and the lockboot:harness image (workspace `make selftest-<arch>`).
+SELFTEST_TIMEOUT_x86_64  ?= 300
+SELFTEST_TIMEOUT_aarch64 ?= 300
+.PHONY: selftest
+selftest:
+	@echo "needs an arch suffix, e.g. 'make selftest-x86_64'." >&2; exit 2
+selftest-%:
+	@fail=0; T=$(SELFTEST_TIMEOUT_$*); sum="build/$*/selftest.summary"; mkdir -p build/$*; : > "$$sum"; \
+	for m in "pivot:PIVOT_TEST=PASS:INIT_PAYLOAD=pivot-init" "grow:GROW_TEST=PASS:INIT_PAYLOAD=grow-probe PERSIST_GROW=10G"; do \
+		name="$${m%%:*}"; rest="$${m#*:}"; marker="$${rest%%:*}"; vars="$${rest#*:}"; \
+		log="build/$*/selftest-$$name.log"; \
+		echo "==================== stage2 test [$$name] $$vars -> $$log"; \
+		$(MAKE) --no-print-directory test-pivot-$* $$vars HARNESS_TIMEOUT=$$T > "$$log" 2>&1 || true; \
+		if grep -q "$$marker" "$$log"; then \
+			echo "PASS [$$name]" | tee -a "$$sum"; \
+		else \
+			echo "FAIL [$$name] (see $$log)" | tee -a "$$sum"; fail=1; \
+		fi; \
+	done; \
+	echo "==================== stage2 self-test summary ($*)"; cat "$$sum"; \
+	if [ "$$fail" = 0 ]; then echo "ALL STAGE2 SELF-TESTS PASSED ($*)"; else echo "SOME STAGE2 SELF-TESTS FAILED ($*)"; exit 1; fi
