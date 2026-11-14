@@ -154,8 +154,12 @@ fn hex(bytes: &[u8]) -> String {
 /// the partitions on first boot and *grows* p3 into a larger volume later — p3's start
 /// never moves (p2 is fixed), so extending only its end preserves the encrypted data.
 /// Refuses to shrink. Rebuilds the GPT preserving the ESP at its exact extent (a table
-/// rewrite doesn't touch partition contents). Returns `(runtime_path, data_path)`.
-pub fn ensure_partitions(device: &Path, runtime_lbas: u64) -> Result<(PathBuf, PathBuf)> {
+/// rewrite doesn't touch partition contents). Returns `(runtime_path, data_path, wrote)`:
+/// `wrote` is true when the GPT was rewritten, which the firmware measures on the next boot
+/// (the caller reboots before deriving anything from the PCRs). A rewrite is read back from
+/// the device, bypassing the buffer cache, and must show p3 ending at the last usable LBA, so
+/// a write that didn't persist fails here instead of rebooting into the same rewrite again.
+pub fn ensure_partitions(device: &Path, runtime_lbas: u64) -> Result<(PathBuf, PathBuf, bool)> {
     let runtime_lbas = align_up(runtime_lbas, ALIGN_LBA);
     let esp_type = Uuid::parse_str(ESP_TYPE_GUID).unwrap();
     let data_type = Uuid::parse_str(DATA_TYPE_GUID).unwrap();
@@ -210,7 +214,7 @@ pub fn ensure_partitions(device: &Path, runtime_lbas: u64) -> Result<(PathBuf, P
         }
         if dl == last_usable {
             // Already fills the device — leave the GPT untouched (kernel already has it).
-            return Ok((part_path(device, 2), part_path(device, 3)));
+            return Ok((part_path(device, 2), part_path(device, 3), false));
         }
         // dl < last_usable → grow p3 (fall through to rebuild).
     }
@@ -247,7 +251,41 @@ pub fn ensure_partitions(device: &Path, runtime_lbas: u64) -> Result<(PathBuf, P
     dev.sync_all().context("flush GPT to disk")?;
 
     reread_partition_table(device)?;
-    Ok((part_path(device, 2), part_path(device, 3)))
+    verify_data_fills(device, last_usable)?;
+    Ok((part_path(device, 2), part_path(device, 3), true))
+}
+
+/// Read the GPT back from the device itself (buffer cache dropped first) and check that the
+/// data partition ends at `last_usable`, i.e. that the rewrite persisted.
+fn verify_data_fills(device: &Path, last_usable: u64) -> Result<()> {
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(device)
+        .with_context(|| format!("open {} for BLKFLSBUF", device.display()))?;
+    const BLKFLSBUF: libc::c_ulong = 0x1261; // _IO(0x12, 97)
+                                             // SAFETY: valid fd; BLKFLSBUF takes no argument.
+    if unsafe { libc::ioctl(f.as_raw_fd(), BLKFLSBUF as _, 0) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("BLKFLSBUF");
+    }
+    drop(f);
+    let data_type = Uuid::parse_str(DATA_TYPE_GUID).unwrap();
+    let disk = GptConfig::new()
+        .writable(false)
+        .open(device)
+        .with_context(|| format!("re-read GPT on {}", device.display()))?;
+    let data_last = disk
+        .partitions()
+        .values()
+        .find(|p| p.part_type_guid.guid == data_type)
+        .map(|p| p.last_lba);
+    if data_last != Some(last_usable) {
+        bail!(
+            "GPT rewrite did not persist on {}: data partition ends at {data_last:?}, expected {last_usable}",
+            device.display()
+        );
+    }
+    Ok(())
 }
 
 /// Force the kernel to re-read the partition table (`BLKRRPART`) so new partitions

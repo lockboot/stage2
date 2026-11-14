@@ -34,22 +34,24 @@ pub fn extend_config_pcr(digest: &[u8; 32]) -> Result<()> {
         .context("extend PCR15 with config digest")
 }
 
-/// PCRs the data key is bound to: **every PCR except PCR5 and PCR10** — bind broadly by default
+/// PCRs the data key is bound to: **every PCR except PCR10** — bind broadly by default
 /// (per-instance keys make it free; values differ per instance/vendor), so any real change to
-/// firmware/boot/policy/payload wipes. The two exclusions are settled, each measured elsewhere or
-/// otherwise not additive for us — see PCR-BINDING.md for the full analysis:
+/// firmware/boot/policy/payload wipes. See PCR-BINDING.md for the full analysis.
 ///
-/// - **PCR5 (GPT):** the loader rewrites the GPT at runtime (adds p2/p3), so it changes across the
-///   first reboot. (On Nitro its profile is even broader than the GPT.)
-/// - **PCR10 (IMA):** redundant, not a loss. It carries the IMA *boot aggregate* = hash(PCR0-9) —
-///   inputs we already bind individually (0-4,6,7,8,9), minus the deliberately-excluded PCR5 —
-///   plus module measurements, which are already covered by the UKI measurement in **PCR14** (all
-///   modules ship in the measured initramfs). We never use IMA appraisal (`security.ima` xattrs).
-///   And `CONFIG_IMA=y` in the prebuilt Fedora kernel extends PCR10 with the boot aggregate
-///   unconditionally, so it couldn't be suppressed short of recompiling the kernel anyway.
+/// - **PCR5 (GPT) is bound:** the loader rewrites the GPT only on a first boot or a grown volume,
+///   and reboots before deriving this key, so the key always binds the final layout's
+///   measurement. On GCE TDX the firmware logs the GPT into PCR2 (with stage0's Authenticode)
+///   instead; the same rule covers it. Growing the volume therefore changes the key: `/data` is
+///   reinitialized.
+/// - **PCR10 (IMA) is excluded:** redundant, not a loss. It carries the IMA *boot aggregate* =
+///   hash(PCR0-9), inputs we already bind individually, plus module measurements, which are
+///   already covered by the UKI measurement in **PCR14** (all modules ship in the measured
+///   initramfs). We never use IMA appraisal (`security.ima` xattrs). And `CONFIG_IMA=y` in the
+///   prebuilt Fedora kernel extends PCR10 with the boot aggregate unconditionally, so it couldn't
+///   be suppressed short of recompiling the kernel anyway.
 const DATA_KEY_PCRS: &[u8] = &[
-    0, 1, 2, 3, 4, /* 5 excluded (GPT) */ 6, 7, 8, 9, /* 10 excluded (IMA) */ 11, 12, 13,
-    14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, /* 10 excluded (IMA) */ 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23,
 ];
 
 /// Namespace for the `/data` encryption key on this TPM.

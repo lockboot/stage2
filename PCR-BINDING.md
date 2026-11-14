@@ -28,14 +28,15 @@ specific, documented reason.
 
 ## Current bound PCR set
 
-`DISK_KEY_PCRS` in `crates/tpm-derive/src/lib.rs`:
+`DATA_KEY_PCRS` in `crates/tpm-derive/src/lib.rs`:
 
-> **Every PCR 0–23 except PCR5 and PCR10.**
+> **Every PCR 0–23 except PCR10.**
 
-i.e. `{0,1,2,3,4, 6,7,8,9, 11,12,13,14,15,16,17,18,19,20,21,22,23}`. PCR15 additionally
-carries the workload measurement (below). Two PCRs are excluded, each for a reason:
+i.e. `{0,1,2,3,4,5,6,7,8,9, 11,12,13,14,15,16,17,18,19,20,21,22,23}`. PCR15 additionally
+carries the workload measurement (below). PCR5 has been bound since 2026-11-14 (resolution
+below); PCR10 is excluded.
 
-### PCR5 — excluded (GPT / boot-manager config-and-data)
+### PCR5 — bound since 2026-11-14 (GPT); excluded before
 
 PCR5 measures the **GPT partition table** (UEFI `EV_EFI_GPT_EVENT`). Confirmed against
 EDK2 source: `SecurityPkg/Library/DxeTpm2MeasureBootLib/DxeTpm2MeasureBootLib.c`,
@@ -46,8 +47,10 @@ stock OVMF, PCR5 is GPT-only.
 
 `bootstrap` **rewrites the GPT at runtime** on first boot (adds the runtime `p2` + data
 `p3` partitions into the grown volume). That changes the measured GPT, so PCR5 differs on
-the *next* boot. Binding it would rebind the disk key on every partition create/grow and
-wipe the data. → excluded.
+the *next* boot. Until 2026-11-14 the key was derived before that rewrite, so binding PCR5
+would have moved the key at the first reboot → it was excluded. Now `bootstrap` reboots
+after any GPT rewrite, before deriving the key (resolution below), so the key only ever
+binds the final layout's GPT and PCR5 is bound.
 
 Caveat — **Nitro ≠ OVMF here.** AWS's Nitro TPM PCR profile *defines* PCR5 as *"Boot
 Manager Code Configuration and Data **and** GPT Partition Table"* (Nitro runs OVMF + AWS
@@ -180,7 +183,34 @@ the cmdline** (only `lockdown=confidentiality`):
   stage0) + dm-verity (runtime partition). Attestation lives in PCR10, but our own chain is
   measured into **PCR14** and the workload into **PCR15** — we don't consume PCR10.
 
-## Resolution (2026-07-11)
+## Resolution (2026-11-14): grow, reboot, then derive; PCR5 bound
+
+On GCE TDX the firmware logs the GPT into **PCR2**, together with stage0's own Authenticode
+hash (workspace `tools/pcr-replay/platforms/gcp/README.md`). PCR2 can't be excluded there
+without losing stage0's identity from the key, so excluding PCR5 no longer kept the GPT out
+of the key: on TDX the key moved at the first reboot and `/data` was lost once (GCP reboot
+test, 2026-11-10).
+
+The fix is the same on every platform: if `ensure_partitions()` wrote the GPT this boot,
+`bootstrap` syncs and reboots before deriving anything from the PCRs. The next boot finds
+p3 filling the device, writes nothing, and derives the key from the final layout. A rewrite
+is read back from the device (buffer cache dropped) and must show p3 ending at the last
+usable LBA, or the boot fails closed instead of rebooting into the same rewrite.
+
+- The key binds the GPT everywhere, so **PCR5 is bound** (only PCR10 is excluded).
+- First boot costs one extra boot; nothing written to `/data` is lost.
+- **Growing the volume changes the key**: grow, reboot, `/data` reinitialized (fail
+  closed). Accepted: the disk layout is part of the measured state.
+- Verifiers reproduce the rewritten GPT's measurement from the GPT digests the attestation
+  carries (lockboot/vaportpm#12), not from release artifacts.
+- Rejected: binding stage0's identity through PCR7 and excluding PCR2. stage0's Secure Boot
+  keys are minted per build and discarded, but that guarantee rests on a deletion nobody can
+  demonstrate, not on a measurement.
+
+The Nitro caveat under PCR5 above still applies (O3 in the workspace's
+`PLAN-GPT-MEASUREMENT.md`): confirm PCR5's contents on EC2 before relying on it there.
+
+## Resolution (2026-07-11, superseded for PCR5)
 
 **Bind every PCR except {5, 10}; both settled.** PCR5 is the runtime-mutated GPT; PCR10 is
 redundant for us (its boot aggregate = hash(PCR0–9), whose inputs we bind individually minus
