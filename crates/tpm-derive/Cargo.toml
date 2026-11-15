@@ -8,5 +8,5 @@ license.workspace = true
 anyhow = { workspace = true }
 sha2 = { workspace = true }
 # The TPM I/O + deterministic PCR-bound derivation live in vaportpm. Pinned to the
-# v0.3.0 release rev (matches the sibling repos' git-dep style).
-vaportpm-attest = { git = "https://github.com/lockboot/vaportpm", rev = "7041f461eb33bc15ad914466042b7befe358d119", version = "=0.3.0" }
+# v0.4.1 release rev (matches the sibling repos' git-dep style).
+vaportpm-attest = { git = "https://github.com/lockboot/vaportpm", rev = "157ec04bf2efafc9d096dd063c904d9739156a86", version = "=0.4.1" }
