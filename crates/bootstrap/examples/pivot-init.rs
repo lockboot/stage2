@@ -8,11 +8,13 @@
 //!           ephemeral probe; reboot.
 //!   boot 2: [persist] the /data sentinel survived; [integrity] the overlay-root probe did NOT
 //!           (ephemeral). Then PASS.
+//! Every boot also prints the evidence an off-machine check needs (workspace
+//! `tools/cloudtest/`): the config digest, stage1's attestation and every PCR.
 //! Not production.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 const SENTINEL: &[u8] = b"LOCKBOOT-PIVOT-PERSIST-v1";
@@ -23,7 +25,12 @@ const BASE_MIB: u64 = 64; // the baked ext4 base; a grown /data must be well pas
 
 fn main() {
     println!("=== pivot-init (PID {}) ===", std::process::id());
-    match run() {
+    let mut cfg = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut cfg) {
+        println!("CONFIG error: {e}");
+    }
+    dump_evidence(&cfg);
+    match run(&cfg) {
         Ok(true) => {
             println!("PIVOT_TEST=PASS all properties verified");
             poweroff();
@@ -39,7 +46,7 @@ fn main() {
     }
 }
 
-fn run() -> Result<bool> {
+fn run(cfg: &[u8]) -> Result<bool> {
     let boot: u32 = fs::read_to_string(COUNTER)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -48,7 +55,7 @@ fn run() -> Result<bool> {
     println!("boot#{}", boot + 1);
 
     if boot == 0 {
-        check_config()?;
+        check_config(cfg)?;
         check_attestations()?;
         check_resized()?;
         fs::write(EPHEMERAL_PROBE, b"x").context("write ephemeral probe to /")?;
@@ -74,11 +81,8 @@ fn run() -> Result<bool> {
 }
 
 /// [config] the transparent JSON arrives verbatim on stdin.
-fn check_config() -> Result<()> {
-    let mut cfg = String::new();
-    std::io::stdin()
-        .read_to_string(&mut cfg)
-        .context("read config from stdin")?;
+fn check_config(cfg: &[u8]) -> Result<()> {
+    let cfg = String::from_utf8_lossy(cfg);
     if cfg.trim().is_empty() {
         bail!("empty config on stdin -- loader did not forward the doc");
     }
@@ -111,7 +115,65 @@ fn check_resized() -> Result<()> {
     Ok(())
 }
 
+/// Evidence for an off-machine check, in the formats its tools read:
+/// - `CONFIG bytes=<n> sha256=<hex>`: the digest the loader bound into PCR15;
+/// - stage1's attestation, base64 between the markers vaportpm-verify accepts (base64 so no
+///   console line is long enough to be split);
+/// - every PCR in every bank as `PCR <bank> <nn> <hex>` (pcr-replay `--check`). These are read
+///   from the TPM here, not quoted.
+fn dump_evidence(cfg: &[u8]) {
+    let d = tpm_derive::config_digest(cfg);
+    let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
+    println!("CONFIG bytes={} sha256={hex}", cfg.len());
+
+    match fs::read("/run/lockboot/stage1.attest") {
+        Ok(a) => {
+            println!("===ATTESTATION-BEGIN===");
+            for line in base64(&a).as_bytes().chunks(76) {
+                println!("{}", String::from_utf8_lossy(line));
+            }
+            println!("===ATTESTATION-END===");
+        }
+        Err(e) => println!("[attest] no stage1 attestation to print: {e}"),
+    }
+
+    for bank in ["sha1", "sha256", "sha384", "sha512"] {
+        for i in 0..24 {
+            if let Ok(v) = fs::read_to_string(format!("/sys/class/tpm/tpm0/pcr-{bank}/{i}")) {
+                println!("PCR {bank} {i:02} {}", v.trim().to_lowercase());
+            }
+        }
+    }
+    println!("=== PCR-DUMP-END ===");
+}
+
 // ---- helpers ----
+
+/// Standard base64 with padding.
+fn base64(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() {
+                A[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+/// Let the console drain before the machine goes away: a 115200-baud serial console is still
+/// sending the last lines when the kernel resets or powers down.
+fn drain_console() {
+    let _ = std::io::stdout().flush();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+}
 
 fn statvfs_total(path: &str) -> Result<u64> {
     let c = std::ffi::CString::new(path)?;
@@ -131,6 +193,7 @@ fn present(b: bool) -> &'static str {
 }
 
 fn reboot() {
+    drain_console();
     // SAFETY: PID 1 warm reboot; sync then restart.
     unsafe {
         libc::sync();
@@ -140,6 +203,7 @@ fn reboot() {
 }
 
 fn poweroff() {
+    drain_console();
     // SAFETY: PID 1 power-off; sync then poweroff.
     unsafe {
         libc::sync();

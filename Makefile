@@ -75,6 +75,12 @@ CARGO = cargo
 lock:
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) $(CARGO) generate-lockfile
 
+# Re-resolve Cargo.lock's vaportpm-attest entry to the rev in tpm-derive's Cargo.toml (after
+# bumping it), leaving every other dependency as locked (`lock` re-resolves them all).
+.PHONY: update-vaportpm
+update-vaportpm: docker-build-base
+	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) $(CARGO) update -p vaportpm-attest
+
 check:
 	$(DOCKER_RUN) $(DOCKER_SAMEUSER) $(BUILD_IMAGE) $(CARGO) check --workspace --all-targets --locked
 

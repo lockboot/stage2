@@ -50,14 +50,22 @@ fn run() -> Result<()> {
     // SAFETY: fd 0 is a seekable memfd (stage1's model); rewind it for the downstream /init.
     unsafe { libc::lseek(0, 0, libc::SEEK_SET) };
 
-    // XTS data key, bound to PCR14 (code+rootfs) + PCR15 (config) + the rest.
-    let key = tpm_derive::derive_data_key().context("derive data key")?;
-
     // Partitions on the boot device.
     let device = blockdev::find_boot_device().context("find boot device")?;
-    let (runtime_part, data_part) =
+    let (runtime_part, data_part, wrote_gpt) =
         blockdev::ensure_partitions(&device, runtime_lbas(payload.rootfs_erofs.len()))
             .context("ensure partitions")?;
+
+    // The firmware measured the GPT this boot started with (PCR5; PCR2 on GCE TDX), and the data
+    // key binds it. If we just rewrote it (first boot, or a grown volume), reboot so the key is
+    // only ever derived from the final layout's measurement. The next boot finds p3 filling the
+    // device and writes nothing. A grown volume therefore gets a new key: /data is reinitialized.
+    if wrote_gpt {
+        provisioning_reboot();
+    }
+
+    // XTS data key, bound to PCR14 (code+rootfs) + PCR15 (config) + the rest.
+    let key = tpm_derive::derive_data_key().context("derive data key")?;
 
     // Verity runtime (ro) = the overlay lower; flush-if-mismatch.
     let rt = blockdev::RuntimeImage {
@@ -116,6 +124,21 @@ fn run() -> Result<()> {
 
     // Pivot onto the overlay and exec /init (fd 0 = rewound config memfd).
     pivot::switch_root_exec(NEWROOT, INIT)
+}
+
+/// Reboot after a GPT rewrite, before anything is derived from the PCRs. If the kernel refuses,
+/// return to `fatal_halt` rather than continue on a measurement that no longer matches the disk.
+fn provisioning_reboot() -> ! {
+    eprintln!("loader: GPT rewritten -> rebooting so the firmware measures the final layout");
+    // SAFETY: PID 1; flush, then restart. reboot() only returns on failure.
+    unsafe {
+        libc::sync();
+        libc::reboot(libc::LINUX_REBOOT_CMD_RESTART);
+    }
+    fatal_halt(anyhow::anyhow!(
+        "provisioning reboot failed: {}",
+        std::io::Error::last_os_error()
+    ))
 }
 
 /// Fatal boot error handler for PID 1. Log the error, give a 60 s grace window for console/serial
