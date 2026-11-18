@@ -207,8 +207,8 @@ usable LBA, or the boot fails closed instead of rebooting into the same rewrite.
   keys are minted per build and discarded, but that guarantee rests on a deletion nobody can
   demonstrate, not on a measurement.
 
-The Nitro caveat under PCR5 above still applies (O3 in the workspace's
-`PLAN-GPT-MEASUREMENT.md`): confirm PCR5's contents on EC2 before relying on it there.
+The Nitro caveat under PCR5 above still applies: confirm PCR5's contents on EC2 before
+relying on it there.
 
 ## Resolution (2026-07-11, superseded for PCR5)
 
